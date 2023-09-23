@@ -22,3 +22,7 @@ A list of functionality-enhancements (like timeouts, loss recovery...):
 When implementing (your own) tcp, one problem is, that the kernel already implements it's own tcp-stack. That can interfere with our packets etc.
 - the solution here, TUN/TAP - https://www.gabriel.urdhr.fr/2021/05/08/tuntap/
 - this way the kernel will basically create a virtual networkcard/networkinterface (the TUN) we can use for our tcp-implementation.
+
+## currently
+
+0:14:12 
