@@ -64,7 +64,12 @@ tshark -i tun0
 # to quickly find our process if we need to kill it manually
 pgrep -af target
 
+# manually ping our interface
+ping -I tun0 192.168.0.1
+# manually trying to connect via tcp
+nc 192.168.0.2 80
 
 ```
 ## currently
-- video 1 - https://www.youtube.com/watch?v=bzja9fQWzdA&t=852s - 0:27:20 
+- video 1 - 0:50:00 
+- https://www.youtube.com/watch?v=bzja9fQWzdA&t=3000s
