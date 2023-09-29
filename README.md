@@ -1,9 +1,11 @@
 # Implementing basic TCP in rust
 
+A Rust implementatio of the Transmission control Protocol. Just for the purpose of learning.
+
 Along the Video https://www.youtube.com/watch?v=bzja9fQWzdA&list=PLqbS7AVVErFivDY3iKAQk3_VAm8SXwt1X&index=11 by Jon Gjengset on Youtube
 
-## currently
-https://www.youtube.com/watch?v=bzja9fQWzdA&t=6060s
+## currently on timestamp
+https://www.youtube.com/watch?v=bzja9fQWzdA&t=7380s
 
 
 ## Notes on setting up tun tap
@@ -128,6 +130,12 @@ taken from: https://www.rfc-editor.org/rfc/rfc793.html#page-22
 ```
 
 ### the datastream beeing transmitted
+
+#### Sequence Numbers
+- every byte of data send over a TCP connection has a sequence number. So every byte can/must be acknowledged.
+- if we acknowledge say byte 1111, we signal we received every previous byte before 1111 aswell.
+- sequence space is finite (`2^32 byte = 4.3 GB`) so it will wrap arround. (need to modulo it etc.)
+
 **The send-sequence needs the following info (check rfc for all values):**
 
 - SND.UNA - whate we have sent, but what has not been acknowledged.
@@ -150,7 +158,6 @@ from: https://www.rfc-editor.org/rfc/rfc793.html#page-19
 4 - future sequence numbers which are not yet allowed
 ```
 
-
 **The receive-sequence needs the following info (check rfc for all values):**
 
 - RCV.NXT - what we expect the next sequence-byte we receive to be
@@ -168,3 +175,15 @@ from: https://www.rfc-editor.org/rfc/rfc793.html#page-19
 2 - sequence numbers allowed for new reception
 3 - future sequence numbers which are not yet allowed
 ```
+
+### 3way Handshake 
+- https://www.rfc-editor.org/rfc/rfc793.html#page-26
+
+- the Sequence-Number we start a connection gets picked randomly. This will avoid overlap if a one partner reconnects while the other still has a sequence. The likelyhood of both fitting together is really really slim.
+    - in reality its not just random but randomly increasing. So old possible connections get timed out before the cycle repeats.
+
+1. `A --> B` SYN my sequence number is X
+2. `A <-- B` ACK your sequence number is X
+3. `A <-- B` SYN my sequence number is Y
+4. `A --> B` ACK your sequence number is X
+5. After this handshake the connection is established (State::ESTAB)
