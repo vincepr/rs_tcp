@@ -111,9 +111,10 @@ impl Connection {
                 iph.source()[3],
             ],
         );
-        
-        // manually calculate the checksum for our outgoing packet
-        syn_ack.checksum = syn_ack.calc_checksum_ipv4(&ip, &[]).expect("unable to compute checksum!");
+
+        // kernel does this following checksum for us so no need to actually calculate it:
+        // syn_ack.checksum = syn_ack.calc_checksum_ipv4(&ip, &[])
+            // .expect("unable to compute checksum!");
 
         // we construct the the headers into buf
         // - we create a slice that points to the entire buf
@@ -125,10 +126,9 @@ impl Connection {
             syn_ack.write(&mut unwritten);
             unwritten.len()
         };
-        print!("got ");
-        dbg_print_incoming_packet(iph, tcph);
-        dbg_print_response_packet(&buf, unwritten);
-
+        
+        // dbg_print_incoming_packet(iph, tcph);
+        // dbg_print_response_packet(&buf, unwritten);
         nic.send(&buf[..buf.len() - unwritten])?;
         return Ok(Some(c));
     }
@@ -144,6 +144,8 @@ impl Connection {
         unimplemented!()
     }
 
+
+    #[allow(dead_code)]
     fn dbg_print_packet<'a>(
         &mut self,
         iph: etherparse::Ipv4HeaderSlice<'a>,
@@ -161,10 +163,17 @@ impl Connection {
     }
 }
 
-fn dbg_print_incoming_packet(iph: etherparse::Ipv4HeaderSlice<'_>, tcph: etherparse::TcpHeaderSlice<'_>)  {
+
+
+#[allow(dead_code)]
+fn dbg_print_incoming_packet(
+    iph: etherparse::Ipv4HeaderSlice<'_>,
+    tcph: etherparse::TcpHeaderSlice<'_>,
+) {
     eprintln!("got iph {:02x?} and tcph {:02x?}\n", iph, tcph);
 }
 
+#[allow(dead_code)]
 fn dbg_print_response_packet(buf: &[u8], unwritten: usize) {
-    eprintln!("reponding with {:02x?}\n", &buf[.. buf.len() - unwritten])
+    eprintln!("reponding with {:02x?}\n", &buf[..buf.len() - unwritten])
 }

@@ -21,15 +21,6 @@ fn main() -> io::Result<()> {
     loop {
         // bytes we received
         let nbytes = nic.recv(&mut buf[..])?;
-        // // info on the ETHERNET FRAME we got:
-        // let _eth_flags = u16::from_be_bytes([buf[0], buf[1]]);
-        // let eth_proto = u16::from_be_bytes([buf[2], buf[3]]);
-
-        // // proto=0x0800->Ipv4-packet | proto=0x86dd->Ipv6-packet
-        // if eth_proto != 0x0800 {
-        //     continue;
-        // } // we ignore all but ipv4
-        //   // eprint!("tun-flags: {:X}, tun-proto: {:x}, || ", _eth_flags, eth_proto);
 
         // we match against the expected Ipv4-Packet
         match etherparse::Ipv4HeaderSlice::from_slice(&buf[..nbytes]) {
@@ -80,7 +71,9 @@ fn main() -> io::Result<()> {
                 }
                 //eprintln!("got {} bytes of ipv4: payload:{:x?}", nbytes - 4, p.payload_len());
             }
-            Err(err) => eprintln!("Ignoring bad-IP-packet. With err:{err:?}"),
+            Err(err) => {
+                // eprintln!("Ignoring bad-IP-packet. With err:{err:?}")
+            },
         }
     }
     //Ok(())
