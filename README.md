@@ -6,7 +6,7 @@ Along the Video https://www.youtube.com/watch?v=bzja9fQWzdA&list=PLqbS7AVVErFivD
 
 ## currently on timestamp
 
-https://www.youtube.com/watch?v=bzja9fQWzdA&t=19187
+https://www.youtube.com/watch?v=bzja9fQWzdA&t=8970
 
 ## Notes on setting up tun tap
 - a simple main.rs, creating the run interface, listening on it and just printing out received bytes:
