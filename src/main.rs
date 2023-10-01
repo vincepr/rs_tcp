@@ -13,7 +13,7 @@ struct Quad {
 fn main() -> io::Result<()> {
     println!("starting");
 
-    let mut connections: HashMap<Quad, tcp::State> = Default::default();
+    let mut connections: HashMap<Quad, tcp::Connection> = Default::default();
 
     let mut nic = tun_tap::Iface::new("tun0", tun_tap::Mode::Tun)?;
     let mut buf = [0u8; 1504];
@@ -47,15 +47,32 @@ fn main() -> io::Result<()> {
                 let iph_size = iph.slice().len();
                 match etherparse::TcpHeaderSlice::from_slice(&buf[4 + iph_size..nbytes]) {
                     Ok(tcph) => {
+                        use std::collections::hash_map::Entry;
                         let tcph_size = tcph.slice().len();
                         let data_start_idx = 4 + iph_size + tcph_size;
-                        connections
-                            .entry(Quad {
-                                src: (src, tcph.source_port()),
-                                dst: (dst, tcph.destination_port()),
-                            })
-                            .or_default()
-                            .on_packet(&mut nic, iph, tcph, &buf[data_start_idx..nbytes])?;
+                        match connections.entry(Quad {
+                            src: (src, tcph.source_port()),
+                            dst: (dst, tcph.destination_port()),
+                        }) {
+                            Entry::Occupied(mut c) => {
+                                // existing connecion
+                                c.get_mut().on_packet(
+                                    &mut nic,
+                                    iph,
+                                    tcph,
+                                    &buf[data_start_idx..nbytes],
+                                )?;
+                            }
+                            Entry::Vacant(e) => {
+                                //
+                                if let Some(mut c) = tcp::Connection::accept(
+                                    &mut nic,
+                                    iph,
+                                    tcph,
+                                    &buf[data_start_idx..nbytes],
+                                )? {}
+                            }
+                        }
 
                         //eprintln!("{src}->{dst} (proto:{proto}|{}bytes-payload) port:{}", tcph.slice().len(), tcph.destination_port());
                     }
