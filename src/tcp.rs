@@ -5,6 +5,12 @@ pub enum State {
     // Listen,
     SynRcvd,
     Estab,
+    /// we sent fin to signal we want to close down connection
+    FinWait1,
+    FinWait2,
+    /// other party sent us signal to fin => were closing down connection
+    // CloseWait,
+    Closing,
 }
 
 impl State {
@@ -12,6 +18,9 @@ impl State {
         match *self {
             State::SynRcvd => false,
             State::Estab => true,
+            State::FinWait1 => true,
+            State::FinWait2 => true,
+            State::Closing => true,
         }
     }
 }
@@ -29,7 +38,7 @@ pub struct Connection {
 
 /// state of the Send Sequence - https://www.rfc-editor.org/rfc/rfc793.html#page-19
 struct SendSequence {
-    /// send unacknowledged:
+    /// send unacknowledged. this is how far we know the other person received since he acked it.
     una: u32,
     /// send next:
     nxt: u32,
@@ -133,8 +142,7 @@ impl Connection {
         // self.tcp.checksum = self.tcp.calc_checksum_ipv4(&self.ip, &[])
         // .expect("unable to compute checksum!");
 
-        // we construct the the headers into buf
-        // - we create a slice that points to the entire buf
+        // - we create a slice-pointer unwritten, that points to the entire buf
         // - every time we write() the start of that buffer gets moved forward
         // - unwritten.len() -> returns how much is remaining of the buffer
         use std::io::Write;
@@ -160,8 +168,10 @@ impl Connection {
     }
 
     // sends a reset packet
-    pub fn send_reset(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
+    fn send_reset(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
         self.tcp.rst = true;
+        // TODO: fix sequence numbers here
+        // TODO: handle synchroniyed reset
         self.tcp.sequence_number = 0;
         self.tcp.acknowledgment_number = 0;
         self.write(nic, &[])?;
@@ -177,13 +187,16 @@ impl Connection {
         data: &'a [u8],
     ) -> io::Result<()> {
         // check if ack we got is ok
-        if !is_valid_ack(self.send.una, tcph.acknowledgment_number(), self.send.nxt) {
+        let ackn = tcph.acknowledgment_number();
+        if !is_valid_ack(self.send.una, ackn, self.send.nxt) {
             if !self.state.is_synchronized() {
                 // according to reset synchronication we send a reset
                 self.send_reset(nic);
             }
             return Ok(());
         }
+        // we take note of how far we know the other party acks (we know he got)
+        self.send.una = ackn;   // ack is the next byte they are expecting == first unacknowledged byte
 
         // check if segment is in our range that we accept (window-size in bytes)
         // wrong lengths or we receive outside our window we quit out with Ok(()):
@@ -235,14 +248,16 @@ impl Connection {
         //     } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seq, wend)
         //         && !is_between_wrapped(
         //             self.recv.nxt.wrapping_sub(1),
-        //             seq + seg_len - 1,
+        //             seq.wrapping_add(seg_len-1),
         //             wend,
         //         )
         //     {
         //         return Ok(());
         //     }
         // }
-
+        self.recv.nxt = seq.wrapping_add(seg_len);
+        // TODO: we should ack that are moving our nxt so other party can move up their una
+        
         self.dbg_print_packet(&iph, &tcph, data);
         match self.state {
             State::SynRcvd => {
@@ -250,11 +265,42 @@ impl Connection {
                 if !tcph.ack() {
                     return Ok(());
                 }
+                
+                // must have ACKed our SYN, since we detected at least one acked  byte
+                // and we have only sent one byte (the SYN)
                 self.state = State::Estab;
-            }
+
+                // for now we try to close the connection here:
+                // TODO: needs to be stored in the retransmission queue. (retransmissions might still have to be sent with fin=false)
+                self.tcp.fin = true;
+                self.write(nic, &[])?;
+                self.state = State::FinWait1;
+            },
             State::Estab => {
-                todo!()
-            }
+                unimplemented!()
+            },
+            State::FinWait1 => {
+                // We already sent fin to signal we want to close down connection.
+                if !tcph.fin() || data.is_empty() {
+                    unimplemented!()
+                }
+
+                // must have ACKed our FIN, since we detected at least one acked  byte
+                // and we have only sent one byte (the FIN)
+                self.state = State::FinWait2;
+            },
+            State::FinWait2 => {
+                // We already sent fin to signal we want to close down connection.
+                if !tcph.fin() || data.is_empty() {
+                    unimplemented!()
+                }
+
+                // must have ACKed our FIN, since we detected at least one acked  byte
+                // and we have only sent one byte (the FIN)
+                self.tcp.fin = false;
+                self.write(nic, &[])?;  // we ack that we got fin
+                self.state = State::Closing;
+            },
         }
         Ok(())
     }
@@ -267,7 +313,7 @@ impl Connection {
         data: &'a [u8],
     ) {
         eprintln!(
-            "{}:{}->{}:{} || {}b",
+            "dbg_print_packet() {}:{}->{}:{} || {}b",
             iph.source_addr(),
             tcph.source_port(),
             iph.destination_addr(),

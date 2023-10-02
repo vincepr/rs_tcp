@@ -5,7 +5,7 @@ A Rust implementatio of the Transmission control Protocol. Just for the purpose 
 Along the Video https://www.youtube.com/watch?v=bzja9fQWzdA&list=PLqbS7AVVErFivDY3iKAQk3_VAm8SXwt1X&index=11 by Jon Gjengset on Youtube
 
 ## currently on timestamp
-at 3:52:40
+at 4:19:51
 https://www.youtube.com/watch?v=bzja9fQWzdA&t=13960s
 
 ## Notes on setting up tun tap
