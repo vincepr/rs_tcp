@@ -7,6 +7,15 @@ pub enum State {
     Estab,
 }
 
+impl State {
+    fn is_synchronized(&self) -> bool {
+        match *self {
+            State::SynRcvd => false,
+            State::Estab => true,
+        }
+    }
+}
+
 /// Transmission Control Block(TCB). stores all connection records.
 /// - since tcp might have to resend packets it needs to keep track of what it sent
 pub struct Connection {
@@ -15,6 +24,7 @@ pub struct Connection {
     recv: RecvSequence,
     /// the ip header we use to send
     ip: etherparse::Ipv4Header,
+    tcp: etherparse::TcpHeader,
 }
 
 /// state of the Send Sequence - https://www.rfc-editor.org/rfc/rfc793.html#page-19
@@ -62,25 +72,26 @@ impl Connection {
             return Ok(None); // we only expect/allow SYN packet from unknown.
         }
         // rcv SYN -> snd SYN,ACK (gets sent back) -> connection gets created
-        let iss = 0; // default 1460?
+        let iss = 0;
+        let wnd = 10; // default 1460?
         let mut c = Connection {
             state: State::SynRcvd,
             send: SendSequence {
                 // set stuff for our answer back:
                 iss,
                 una: iss, // TODO: randomize this as per spec
-                nxt: iss + 1,
-                wnd: 10,
+                nxt: iss,
+                wnd,
                 up: false,
                 wl1: 0,
                 wl2: 0,
             },
             recv: RecvSequence {
                 // we keep track of sender-info / aka. client-info
+                irs: tcph.sequence_number(),
                 nxt: tcph.sequence_number() + 1,
                 wnd: tcph.window_size(),
                 up: false,
-                irs: tcph.sequence_number(),
             },
             ip: etherparse::Ipv4Header::new(
                 0,
@@ -99,43 +110,65 @@ impl Connection {
                     iph.source()[3],
                 ],
             ),
+            // we construct the tcp-header and set its proper flags
+            tcp: etherparse::TcpHeader::new(tcph.destination_port(), tcph.source_port(), iss, wnd),
         };
+        c.tcp.syn = true;
+        c.tcp.ack = true;
+        c.write(nic, &[])?;
+        Ok(Some(c))
+    }
 
-        // we construct the tcp-header and set its proper flags
-        let mut syn_ack = etherparse::TcpHeader::new(
-            tcph.destination_port(),
-            tcph.source_port(),
-            c.send.iss,
-            c.send.wnd,
+    // writes however much of the payload it can
+    fn write(&mut self, nic: &mut tun_tap::Iface, payload: &[u8]) -> io::Result<usize> {
+        let mut buf = [0u8; 1500];
+        self.tcp.sequence_number = self.send.nxt;
+        self.tcp.acknowledgment_number = self.recv.nxt;
+        let size = std::cmp::min(
+            buf.len(),
+            self.tcp.header_len() as usize + self.ip.header_len() as usize + payload.len(),
         );
-        syn_ack.acknowledgment_number = c.recv.nxt;
-        syn_ack.syn = true;
-        syn_ack.ack = true;
-        c.ip.set_payload_len(syn_ack.header_len() as usize + 0);
-
-        // we construct the ip-header
-
+        self.ip.set_payload_len(size);
         // kernel does this following checksum for us so no need to actually calculate it:
-        // syn_ack.checksum = syn_ack.calc_checksum_ipv4(&c.ip, &[])
+        // self.tcp.checksum = self.tcp.calc_checksum_ipv4(&self.ip, &[])
         // .expect("unable to compute checksum!");
 
         // we construct the the headers into buf
         // - we create a slice that points to the entire buf
         // - every time we write() the start of that buffer gets moved forward
         // - unwritten.len() -> returns how much is remaining of the buffer
-        let unwritten = {
-            let mut unwritten = &mut buf[..];
-            c.ip.write(&mut unwritten);
-            syn_ack.write(&mut unwritten);
-            unwritten.len()
-        };
-
-        // dbg_print_incoming_packet(iph, tcph);
+        use std::io::Write;
+        let mut unwritten = &mut buf[..];
+        self.ip.write(&mut unwritten);
+        self.tcp.write(&mut unwritten)?;
+        let payload_bytes = unwritten.write(payload)?; // write as much as possible (might be too much data)
+        let unwritten = unwritten.len();
         // dbg_print_response_packet(&buf, unwritten);
+        // increment our sequence number:
+        self.send.nxt = self.send.nxt.wrapping_add(payload_bytes as u32);
+        if self.tcp.syn {
+            self.send.nxt = self.send.nxt.wrapping_add(1);
+            self.tcp.syn = false;
+        }
+        if self.tcp.fin {
+            self.send.nxt = self.send.nxt.wrapping_add(1);
+            self.tcp.fin = false;
+        }
+        // write out or packet:
         nic.send(&buf[..buf.len() - unwritten])?;
-        return Ok(Some(c));
+        Ok(payload_bytes)
     }
 
+    // sends a reset packet
+    pub fn send_reset(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
+        self.tcp.rst = true;
+        self.tcp.sequence_number = 0;
+        self.tcp.acknowledgment_number = 0;
+        self.write(nic, &[])?;
+        Ok(())
+    }
+
+    // receive a packet on a conn with previous state (ex doing handshake or open connection)
     pub fn on_packet<'a>(
         &mut self,
         nic: &mut tun_tap::Iface,
@@ -145,36 +178,92 @@ impl Connection {
     ) -> io::Result<()> {
         // check if ack we got is ok
         if !is_valid_ack(self.send.una, tcph.acknowledgment_number(), self.send.nxt) {
+            if !self.state.is_synchronized() {
+                // according to reset synchronication we send a reset
+                self.send_reset(nic);
+            }
             return Ok(());
         }
 
         // check if segment is in our range that we accept (window-size in bytes)
+        // wrong lengths or we receive outside our window we quit out with Ok(()):
         let seq = tcph.sequence_number(); // first byte of segment
-        let seq_end = seq.wrapping_add(data.len() as u32).wrapping_sub(1);
-        if !is_valid_segment(self.recv.nxt, seq, self.recv.wnd)
-            && is_valid_segment(self.recv.nxt, seq_end, self.recv.wnd)
-        {
-            return Ok(());
+        let mut seg_len = data.len() as u32;
+        if tcph.fin() {
+            seg_len += 1;
         }
+        if tcph.syn() {
+            seg_len += 1;
+        }
+        let seq_end = seq.wrapping_add(seg_len).wrapping_sub(1);
+        match (seg_len, self.recv.wnd) {
+            (0, 0) => {
+                if seq != self.recv.nxt {
+                    return Ok(());
+                }
+            }
+            (0, 1..) => {
+                if !is_valid_segment(self.recv.nxt, seq, self.recv.wnd) {
+                    return Ok(());
+                }
+            }
+            (1.., 0) => {
+                return Ok(());
+            }
+            (1.., 1..) => {
+                if !is_valid_segment(self.recv.nxt, seq, self.recv.wnd)
+                    && !is_valid_segment(self.recv.nxt, seq_end, self.recv.wnd)
+                {
+                    return Ok(());
+                }
+            }
+        }
+        // // og implementation
+        // let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
+        // if seg_len == 0 {
+        //     // zero length segment has separate rules
+        //     if self.recv.wnd == 0 {
+        //         if seq != self.recv.nxt {
+        //             return Ok(());
+        //         }
+        //     } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seq, wend) {
+        //         return Ok(());
+        //     }
+        // } else {
+        //     if self.recv.wnd == 0 {
+        //         return Ok(());
+        //     } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seq, wend)
+        //         && !is_between_wrapped(
+        //             self.recv.nxt.wrapping_sub(1),
+        //             seq + seg_len - 1,
+        //             wend,
+        //         )
+        //     {
+        //         return Ok(());
+        //     }
+        // }
 
-        self.dbg_print_packet(iph, tcph, data);
+        self.dbg_print_packet(&iph, &tcph, data);
         match self.state {
             State::SynRcvd => {
                 // we expect an ACK back from the SYN we just sent
-
-                Ok(())
+                if !tcph.ack() {
+                    return Ok(());
+                }
+                self.state = State::Estab;
             }
             State::Estab => {
                 todo!()
             }
         }
+        Ok(())
     }
 
     #[allow(dead_code)]
     fn dbg_print_packet<'a>(
         &mut self,
-        iph: etherparse::Ipv4HeaderSlice<'a>,
-        tcph: etherparse::TcpHeaderSlice<'a>,
+        iph: &etherparse::Ipv4HeaderSlice<'a>,
+        tcph: &etherparse::TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) {
         eprintln!(

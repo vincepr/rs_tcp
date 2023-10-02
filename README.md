@@ -5,8 +5,8 @@ A Rust implementatio of the Transmission control Protocol. Just for the purpose 
 Along the Video https://www.youtube.com/watch?v=bzja9fQWzdA&list=PLqbS7AVVErFivDY3iKAQk3_VAm8SXwt1X&index=11 by Jon Gjengset on Youtube
 
 ## currently on timestamp
-at 3:19:35
-https://www.youtube.com/watch?v=bzja9fQWzdA&t=10800s
+at 3:52:40
+https://www.youtube.com/watch?v=bzja9fQWzdA&t=13960s
 
 ## Notes on setting up tun tap
 - a simple main.rs, creating the run interface, listening on it and just printing out received bytes:
