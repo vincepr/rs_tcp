@@ -73,7 +73,7 @@ fn main() -> io::Result<()> {
             }
             Err(err) => {
                 // eprintln!("Ignoring bad-IP-packet. With err:{err:?}")
-            },
+            }
         }
     }
     //Ok(())
