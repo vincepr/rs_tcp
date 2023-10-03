@@ -10,7 +10,7 @@ pub enum State {
     FinWait2,
     /// other party sent us signal to fin => were closing down connection
     // CloseWait,
-    Closing,
+    TimeWait,
 }
 
 impl State {
@@ -20,7 +20,7 @@ impl State {
             State::Estab => true,
             State::FinWait1 => true,
             State::FinWait2 => true,
-            State::Closing => true,
+            State::TimeWait => true,
         }
     }
 }
@@ -186,21 +186,11 @@ impl Connection {
         tcph: etherparse::TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> io::Result<()> {
-        // check if ack we got is ok
-        let ackn = tcph.acknowledgment_number();
-        if !is_valid_ack(self.send.una, ackn, self.send.nxt) {
-            if !self.state.is_synchronized() {
-                // according to reset synchronication we send a reset
-                self.send_reset(nic);
-            }
-            return Ok(());
-        }
-        // we take note of how far we know the other party acks (we know he got)
-        self.send.una = ackn;   // ack is the next byte they are expecting == first unacknowledged byte
-
+        //
+        // SEQUENCE acceptable CHECK
         // check if segment is in our range that we accept (window-size in bytes)
         // wrong lengths or we receive outside our window we quit out with Ok(()):
-        let seq = tcph.sequence_number(); // first byte of segment
+        let seqn = tcph.sequence_number(); // first byte of segment
         let mut seg_len = data.len() as u32;
         if tcph.fin() {
             seg_len += 1;
@@ -208,15 +198,15 @@ impl Connection {
         if tcph.syn() {
             seg_len += 1;
         }
-        let seq_end = seq.wrapping_add(seg_len).wrapping_sub(1);
+        let seq_end = seqn.wrapping_add(seg_len).wrapping_sub(1);
         match (seg_len, self.recv.wnd) {
             (0, 0) => {
-                if seq != self.recv.nxt {
+                if seqn != self.recv.nxt {
                     return Ok(());
                 }
             }
             (0, 1..) => {
-                if !is_valid_segment(self.recv.nxt, seq, self.recv.wnd) {
+                if !is_valid_segment(self.recv.nxt, seqn, self.recv.wnd) {
                     return Ok(());
                 }
             }
@@ -224,7 +214,7 @@ impl Connection {
                 return Ok(());
             }
             (1.., 1..) => {
-                if !is_valid_segment(self.recv.nxt, seq, self.recv.wnd)
+                if !is_valid_segment(self.recv.nxt, seqn, self.recv.wnd)
                     && !is_valid_segment(self.recv.nxt, seq_end, self.recv.wnd)
                 {
                     return Ok(());
@@ -255,53 +245,64 @@ impl Connection {
         //         return Ok(());
         //     }
         // }
-        self.recv.nxt = seq.wrapping_add(seg_len);
+        self.recv.nxt = seqn.wrapping_add(seg_len);
         // TODO: we should ack that are moving our nxt so other party can move up their una
-        
-        self.dbg_print_packet(&iph, &tcph, data);
-        match self.state {
-            State::SynRcvd => {
-                // we expect an ACK back from the SYN we just sent
-                if !tcph.ack() {
-                    return Ok(());
-                }
-                
-                // must have ACKed our SYN, since we detected at least one acked  byte
-                // and we have only sent one byte (the SYN)
-                self.state = State::Estab;
+        // TODO: if seq-check not acceptable send ACK
 
-                // for now we try to close the connection here:
-                // TODO: needs to be stored in the retransmission queue. (retransmissions might still have to be sent with fin=false)
-                self.tcp.fin = true;
-                self.write(nic, &[])?;
-                self.state = State::FinWait1;
-            },
-            State::Estab => {
-                unimplemented!()
-            },
-            State::FinWait1 => {
-                // We already sent fin to signal we want to close down connection.
-                if !tcph.fin() || data.is_empty() {
-                    unimplemented!()
-                }
-
-                // must have ACKed our FIN, since we detected at least one acked  byte
-                // and we have only sent one byte (the FIN)
-                self.state = State::FinWait2;
-            },
-            State::FinWait2 => {
-                // We already sent fin to signal we want to close down connection.
-                if !tcph.fin() || data.is_empty() {
-                    unimplemented!()
-                }
-
-                // must have ACKed our FIN, since we detected at least one acked  byte
-                // and we have only sent one byte (the FIN)
-                self.tcp.fin = false;
-                self.write(nic, &[])?;  // we ack that we got fin
-                self.state = State::Closing;
-            },
+        if !tcph.ack() {
+            return Ok(());
         }
+
+        let ackn = tcph.acknowledgment_number();
+        if let State::SynRcvd = self.state {
+            if !is_between_wrapped(
+                self.send.una.wrapping_sub(1),
+                ackn,
+                self.send.nxt.wrapping_add(1),
+            ) {
+                self.state = State::Estab;
+            } else {
+                // TODO: Reset <SEQ=SEG.ACK><CTL=RST>
+            }
+        }
+
+        if let State::Estab = self.state {
+            //
+            // ACK-CHECK check if ack we got is ok
+            if !is_valid_ack(self.send.una, ackn, self.send.nxt) {
+                return Ok(());
+            }
+            // we take note of how far we know the other party acks (we know he got)
+            self.send.una = ackn; // ack is the next byte they are expecting == first unacknowledged byte
+                                  // TODO
+            assert!(data.is_empty());
+
+            // // for now we try to close the connection here:
+            // // TODO: needs to be stored in the retransmission queue. (retransmissions might still have to be sent with fin=false)
+            self.tcp.fin = true;
+            self.write(nic, &[]);
+            self.state = State::FinWait1;
+        }
+
+        if let State::FinWait1 = self.state {
+            // We already sent fin to signal we want to close down connection.
+            if self.send.una == self.send.iss + 2 {
+                self.state = State::FinWait2;
+            }
+        }
+
+        if tcph.fin() {
+            match self.state {
+                State::FinWait2 => {
+                    // were done with the connection
+                    self.write(nic, &[]);
+                    self.state = State::TimeWait;
+                }
+                _ => unimplemented!(),
+            }
+        }
+
+        self.dbg_print_packet(&iph, &tcph, data);
         Ok(())
     }
 
