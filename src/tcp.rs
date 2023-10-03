@@ -1,5 +1,6 @@
 use std::io;
 
+#[derive(Debug)]
 pub enum State {
     // Closed,
     // Listen,
@@ -25,6 +26,7 @@ impl State {
     }
 }
 
+#[derive(Debug)]
 /// Transmission Control Block(TCB). stores all connection records.
 /// - since tcp might have to resend packets it needs to keep track of what it sent
 pub struct Connection {
@@ -36,6 +38,7 @@ pub struct Connection {
     tcp: etherparse::TcpHeader,
 }
 
+#[derive(Debug)]
 /// state of the Send Sequence - https://www.rfc-editor.org/rfc/rfc793.html#page-19
 struct SendSequence {
     /// send unacknowledged. this is how far we know the other person received since he acked it.
@@ -54,6 +57,7 @@ struct SendSequence {
     iss: u32,
 }
 
+#[derive(Debug)]
 /// state of the Send Sequence https://www.rfc-editor.org/rfc/rfc793.html#page-19
 struct RecvSequence {
     /// receive next:
@@ -82,7 +86,7 @@ impl Connection {
         }
         // rcv SYN -> snd SYN,ACK (gets sent back) -> connection gets created
         let iss = 0;
-        let wnd = 10; // default 1460?
+        let wnd = 1024; // default 1460?
         let mut c = Connection {
             state: State::SynRcvd,
             send: SendSequence {
@@ -137,10 +141,10 @@ impl Connection {
             buf.len(),
             self.tcp.header_len() as usize + self.ip.header_len() as usize + payload.len(),
         );
-        self.ip.set_payload_len(size);
+        self.ip.set_payload_len(size - self.ip.header_len());
         // kernel does this following checksum for us so no need to actually calculate it:
-        // self.tcp.checksum = self.tcp.calc_checksum_ipv4(&self.ip, &[])
-        // .expect("unable to compute checksum!");
+        self.tcp.checksum = self.tcp.calc_checksum_ipv4(&self.ip, &[])
+        .expect("unable to compute checksum!");
 
         // - we create a slice-pointer unwritten, that points to the entire buf
         // - every time we write() the start of that buffer gets moved forward
@@ -199,52 +203,62 @@ impl Connection {
             seg_len += 1;
         }
         let seq_end = seqn.wrapping_add(seg_len).wrapping_sub(1);
-        match (seg_len, self.recv.wnd) {
-            (0, 0) => {
-                if seqn != self.recv.nxt {
-                    return Ok(());
-                }
-            }
-            (0, 1..) => {
-                if !is_valid_segment(self.recv.nxt, seqn, self.recv.wnd) {
-                    return Ok(());
-                }
-            }
-            (1.., 0) => {
-                return Ok(());
-            }
-            (1.., 1..) => {
-                if !is_valid_segment(self.recv.nxt, seqn, self.recv.wnd)
-                    && !is_valid_segment(self.recv.nxt, seq_end, self.recv.wnd)
-                {
-                    return Ok(());
-                }
-            }
-        }
-        // // og implementation
-        // let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
-        // if seg_len == 0 {
-        //     // zero length segment has separate rules
-        //     if self.recv.wnd == 0 {
-        //         if seq != self.recv.nxt {
+        // match (seg_len, self.recv.wnd) {
+        //     (0, 0) => {
+        //         if seqn != self.recv.nxt {
         //             return Ok(());
         //         }
-        //     } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seq, wend) {
+        //     }
+        //     (0, 1..) => {
+        //         if !is_valid_segment(self.recv.nxt, seqn, self.recv.wnd) {
+        //             return Ok(());
+        //         }
+        //     }
+        //     (1.., 0) => {
         //         return Ok(());
         //     }
-        // } else {
-        //     if self.recv.wnd == 0 {
-        //         return Ok(());
-        //     } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seq, wend)
-        //         && !is_between_wrapped(
-        //             self.recv.nxt.wrapping_sub(1),
-        //             seq.wrapping_add(seg_len-1),
-        //             wend,
-        //         )
-        //     {
-        //         return Ok(());
+        //     (1.., 1..) => {
+        //         if !is_valid_segment(self.recv.nxt, seqn, self.recv.wnd)
+        //             && !is_valid_segment(self.recv.nxt, seq_end, self.recv.wnd)
+        //         {
+        //             return Ok(());
+        //         }
         //     }
         // }
+        // og implementation
+        let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
+        let okay = if seg_len == 0 {
+            // zero length segment has separate rules
+            if self.recv.wnd == 0 {
+                if seqn != self.recv.nxt {
+                   false
+                } else {
+                    true
+                }
+            } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend) {
+                false
+            } else {
+                true
+            }
+        } else {
+            if self.recv.wnd == 0 {
+                false
+            } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend)
+                && !is_between_wrapped(
+                    self.recv.nxt.wrapping_sub(1),
+                    seqn.wrapping_add(seg_len-1),
+                    wend,
+                )
+            {
+                false
+            } else {
+                true
+            }
+        };
+        if !okay {
+            self.write(nic, &[]);
+            return Ok(());
+        }
         self.recv.nxt = seqn.wrapping_add(seg_len);
         // TODO: we should ack that are moving our nxt so other party can move up their una
         // TODO: if seq-check not acceptable send ACK
@@ -255,7 +269,7 @@ impl Connection {
 
         let ackn = tcph.acknowledgment_number();
         if let State::SynRcvd = self.state {
-            if !is_between_wrapped(
+            if is_between_wrapped(
                 self.send.una.wrapping_sub(1),
                 ackn,
                 self.send.nxt.wrapping_add(1),
@@ -266,7 +280,7 @@ impl Connection {
             }
         }
 
-        if let State::Estab = self.state {
+        if let State::Estab | State::FinWait1 | State::FinWait2 = self.state {
             //
             // ACK-CHECK check if ack we got is ok
             if !is_valid_ack(self.send.una, ackn, self.send.nxt) {
@@ -277,16 +291,19 @@ impl Connection {
                                   // TODO
             assert!(data.is_empty());
 
-            // // for now we try to close the connection here:
-            // // TODO: needs to be stored in the retransmission queue. (retransmissions might still have to be sent with fin=false)
-            self.tcp.fin = true;
-            self.write(nic, &[]);
-            self.state = State::FinWait1;
+            if let State::Estab = self.state {
+                // // for now we try to close the connection here:
+                // // TODO: needs to be stored in the retransmission queue. (retransmissions might still have to be sent with fin=false)
+                self.tcp.fin = true;
+                self.write(nic, &[]);
+                self.state = State::FinWait1;
+            }
         }
 
         if let State::FinWait1 = self.state {
             // We already sent fin to signal we want to close down connection.
             if self.send.una == self.send.iss + 2 {
+                dbg!("they acked our fin!");
                 self.state = State::FinWait2;
             }
         }
@@ -296,13 +313,13 @@ impl Connection {
                 State::FinWait2 => {
                     // were done with the connection
                     self.write(nic, &[]);
+                    dbg!("they fined!");
                     self.state = State::TimeWait;
                 }
                 _ => unimplemented!(),
             }
         }
-
-        self.dbg_print_packet(&iph, &tcph, data);
+        // self.dbg_print_packet(&iph, &tcph, data);
         Ok(())
     }
 

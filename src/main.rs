@@ -41,6 +41,7 @@ fn main() -> io::Result<()> {
                         use std::collections::hash_map::Entry;
                         let tcph_size = tcph.slice().len();
                         let data_start_idx = iph_size + tcph_size;
+
                         match connections.entry(Quad {
                             src: (src, tcph.source_port()),
                             dst: (dst, tcph.destination_port()),
@@ -61,7 +62,9 @@ fn main() -> io::Result<()> {
                                     iph,
                                     tcph,
                                     &buf[data_start_idx..nbytes],
-                                )? {}
+                                )? {
+                                    e.insert(c);
+                                }
                             }
                         }
 
